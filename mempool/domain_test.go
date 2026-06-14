@@ -2,13 +2,10 @@ package mempool
 
 import (
 	"testing"
-
-	"github.com/tamnd/any-cli/kit"
 )
 
 // These tests are offline: they exercise the URI driver's pure string functions
-// and the host wiring (mint, body, resolve), which need no network. The client's
-// HTTP behaviour is covered in mempool_test.go.
+// without touching the network.
 
 func TestDomainInfo(t *testing.T) {
 	info := Domain{}.Info()
@@ -24,53 +21,122 @@ func TestDomainInfo(t *testing.T) {
 }
 
 func TestClassify(t *testing.T) {
-	cases := []struct{ in, typ, id string }{
-		{"wiki/Go", "page", "wiki/Go"},
-		{"/about/", "page", "about"},
-		{"https://" + Host + "/team/contact", "page", "team/contact"},
+	cases := []struct {
+		in  string
+		typ string
+		id  string
+	}{
+		// Bitcoin address starting with 1
+		{"1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf", "address", "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"},
+		// Bitcoin address starting with 3
+		{"3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy", "address", "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"},
+		// SegWit bech32 address
+		{"bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", "address", "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"},
+		// 64-char hex TXID
+		{"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", "tx", "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"},
+		// block hash (64-char hex but not a txid; classify treats both same way)
+		{"000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "tx", "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"},
+		// numeric height
+		{"953651", "height", "953651"},
+		// URL with address path
+		{"https://mempool.space/address/1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf", "address", "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"},
+		// URL with tx path
+		{"https://mempool.space/tx/4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", "tx", "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"},
+		// URL with block path
+		{"https://mempool.space/block/000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "block", "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"},
 	}
 	for _, tc := range cases {
 		typ, id, err := Domain{}.Classify(tc.in)
-		if err != nil || typ != tc.typ || id != tc.id {
-			t.Errorf("Classify(%q) = (%q, %q, %v), want (%q, %q, nil)",
-				tc.in, typ, id, err, tc.typ, tc.id)
+		if err != nil {
+			t.Errorf("Classify(%q) error: %v", tc.in, err)
+			continue
+		}
+		if typ != tc.typ || id != tc.id {
+			t.Errorf("Classify(%q) = (%q, %q), want (%q, %q)", tc.in, typ, id, tc.typ, tc.id)
 		}
 	}
 }
 
 func TestLocate(t *testing.T) {
-	got, err := Domain{}.Locate("page", "wiki/Go")
-	want := "https://" + Host + "/wiki/Go"
-	if err != nil || got != want {
-		t.Errorf("Locate = (%q, %v), want (%q, nil)", got, err, want)
+	cases := []struct {
+		uriType string
+		id      string
+		want    string
+	}{
+		{"address", "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf", "https://mempool.space/address/1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"},
+		{"tx", "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", "https://mempool.space/tx/4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"},
+		{"block", "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "https://mempool.space/block/000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"},
+	}
+	for _, tc := range cases {
+		got, err := Domain{}.Locate(tc.uriType, tc.id)
+		if err != nil {
+			t.Errorf("Locate(%q, %q) error: %v", tc.uriType, tc.id, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("Locate(%q, %q) = %q, want %q", tc.uriType, tc.id, got, tc.want)
+		}
 	}
 }
 
-// TestHostWiring mounts the driver in a kit Host (the runtime ant drives) and
-// checks the round trip: a record mints to its URI, its body is readable, and a
-// bare id resolves back to the same URI. The init in domain.go registers the
-// domain, so kit.Open finds it.
-func TestHostWiring(t *testing.T) {
-	h, err := kit.Open()
-	if err != nil {
-		t.Fatal(err)
+func TestLocateUnknownType(t *testing.T) {
+	_, err := Domain{}.Locate("unknown", "foo")
+	if err == nil {
+		t.Error("expected error for unknown type, got nil")
 	}
+}
 
-	p := &Page{ID: "wiki/Go", URL: "https://" + Host + "/wiki/Go", Title: "Go", Body: "Go is a language."}
-	u, err := h.Mint(p)
-	if err != nil {
-		t.Fatalf("Mint: %v", err)
+func TestIsBitcoinAddress(t *testing.T) {
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf", true},
+		{"3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy", true},
+		{"bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", true},
+		{"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", false},
+		{"953651", false},
+		{"", false},
 	}
-	if want := "mempool://page/wiki/Go"; u.String() != want {
-		t.Errorf("Mint = %q, want %q", u.String(), want)
+	for _, tc := range cases {
+		if got := isBitcoinAddress(tc.s); got != tc.want {
+			t.Errorf("isBitcoinAddress(%q) = %v, want %v", tc.s, got, tc.want)
+		}
 	}
+}
 
-	if body, ok := h.Body(p); !ok || body == "" {
-		t.Errorf("Body = (%q, %v), want non-empty", body, ok)
+func TestIs64Hex(t *testing.T) {
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", true},
+		{"000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", true},
+		{"abc", false},
+		{"1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf", false},
+		{"", false},
 	}
+	for _, tc := range cases {
+		if got := is64Hex(tc.s); got != tc.want {
+			t.Errorf("is64Hex(%q) = %v, want %v", tc.s, got, tc.want)
+		}
+	}
+}
 
-	got, err := h.ResolveOn("mempool", "about")
-	if err != nil || got.String() != "mempool://page/about" {
-		t.Errorf("ResolveOn = (%q, %v), want mempool://page/about", got.String(), err)
+func TestIsNumeric(t *testing.T) {
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"953651", true},
+		{"0", true},
+		{"abc", false},
+		{"12a3", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isNumeric(tc.s); got != tc.want {
+			t.Errorf("isNumeric(%q) = %v, want %v", tc.s, got, tc.want)
+		}
 	}
 }

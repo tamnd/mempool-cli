@@ -2,14 +2,14 @@ package mempool
 
 import (
 	"context"
-	"net/url"
 	"strings"
+	"unicode"
 
 	"github.com/tamnd/any-cli/kit"
 	"github.com/tamnd/any-cli/kit/errs"
 )
 
-// domain.go exposes mempool as a kit Domain: a driver that a multi-domain
+// domain.go exposes mempool.space as a kit Domain: a driver that a multi-domain
 // host (ant) enables with a single blank import,
 //
 //	import _ "github.com/tamnd/mempool-cli/mempool"
@@ -19,9 +19,6 @@ import (
 // mempool:// URIs by routing to the operations Register installs. The same
 // Domain also builds the standalone mempool binary (see cli.NewApp), so the
 // binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
 func init() { kit.Register(Domain{}) }
 
 // Domain is the mempool driver. It carries no state; the per-run client is
@@ -39,39 +36,44 @@ func (Domain) Info() kit.DomainInfo {
 			Short:  "A command line for Mempool.space Bitcoin data.",
 			Long: `A command line for Mempool.space Bitcoin data.
 
-mempool reads public mempool data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
+mempool reads public Bitcoin blockchain data from mempool.space over plain
+HTTPS, shapes it into clean records, and prints output that pipes into the rest
+of your tools. No API key, nothing to run alongside it.`,
 			Site: Host,
 			Repo: "https://github.com/tamnd/mempool-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Register installs the client factory and every operation onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `mempool page` and
-	// `ant get mempool://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	kit.Handle(app, kit.OpMeta{Name: "price", Group: "read", Single: true,
+		Summary: "Fetch the current BTC price in multiple currencies"}, getPrice)
 
-	// List op: members of a page, the home of `mempool links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// mempool://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	kit.Handle(app, kit.OpMeta{Name: "fees", Group: "read", Single: true,
+		Summary: "Fetch recommended transaction fee rates (sat/vByte)"}, getFees)
+
+	kit.Handle(app, kit.OpMeta{Name: "blocks", Group: "read", List: true,
+		Summary: "List the most recent blocks"}, getBlocks)
+
+	kit.Handle(app, kit.OpMeta{Name: "address", Group: "read", Single: true,
+		Summary: "Fetch chain stats for a Bitcoin address", URIType: "address", Resolver: true,
+		Args: []kit.Arg{{Name: "address", Help: "Bitcoin address"}}}, getAddress)
+
+	kit.Handle(app, kit.OpMeta{Name: "tx", Group: "read", Single: true,
+		Summary: "Fetch a transaction by TXID", URIType: "tx", Resolver: true,
+		Args: []kit.Arg{{Name: "txid", Help: "transaction ID"}}}, getTx)
+
+	kit.Handle(app, kit.OpMeta{Name: "block", Group: "read", Single: true,
+		Summary: "Fetch a block by hash", URIType: "block", Resolver: true,
+		Args: []kit.Arg{{Name: "hash", Help: "block hash"}}}, getBlock)
 }
 
-// newClient builds the client from the host-resolved config, so a host and the
-// standalone binary pace and identify themselves the same way.
+// newClient builds the client from the host-resolved config.
 func newClient(_ context.Context, cfg kit.Config) (any, error) {
-	c := NewClient()
+	c := DefaultConfig()
 	if cfg.UserAgent != "" {
 		c.UserAgent = cfg.UserAgent
 	}
@@ -82,92 +84,189 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 		c.Retries = cfg.Retries
 	}
 	if cfg.Timeout > 0 {
-		c.HTTP.Timeout = cfg.Timeout
+		c.Timeout = cfg.Timeout
 	}
-	return c, nil
+	return NewClient(c), nil
 }
 
 // --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type priceInput struct {
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
+type feesInput struct {
+	Client *Client `kit:"inject"`
+}
+
+type blocksInput struct {
+	Limit  int     `kit:"flag,inherit" help:"number of recent blocks" default:"10"`
+	Client *Client `kit:"inject"`
+}
+
+type addressInput struct {
+	Address string  `kit:"arg" help:"Bitcoin address"`
+	Client  *Client `kit:"inject"`
+}
+
+type txInput struct {
+	TXID   string  `kit:"arg" help:"transaction ID"`
+	Client *Client `kit:"inject"`
+}
+
+type blockInput struct {
+	Hash   string  `kit:"arg" help:"block hash"`
 	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func getPrice(ctx context.Context, in priceInput, emit func(*Price) error) error {
+	p, err := in.Client.GetPrice(ctx)
 	if err != nil {
 		return mapErr(err)
 	}
 	return emit(p)
 }
 
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
+func getFees(ctx context.Context, in feesInput, emit func(*Fees) error) error {
+	f, err := in.Client.GetFees(ctx)
 	if err != nil {
 		return mapErr(err)
 	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	return emit(f)
+}
+
+func getBlocks(ctx context.Context, in blocksInput, emit func(*Block) error) error {
+	blocks, err := in.Client.GetBlocks(ctx, in.Limit)
+	if err != nil {
+		return mapErr(err)
+	}
+	for _, b := range blocks {
+		if err := emit(b); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// --- Resolver: the URI-native string functions, pure and network-free ---
-
-// Classify turns any accepted input — a bare path or a full mempool.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
-func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
-		return "", "", errs.Usage("unrecognized mempool reference: %q", input)
+func getAddress(ctx context.Context, in addressInput, emit func(*Address) error) error {
+	a, err := in.Client.GetAddress(ctx, in.Address)
+	if err != nil {
+		return mapErr(err)
 	}
-	return "page", id, nil
+	return emit(a)
+}
+
+func getTx(ctx context.Context, in txInput, emit func(*Transaction) error) error {
+	tx, err := in.Client.GetTransaction(ctx, in.TXID)
+	if err != nil {
+		return mapErr(err)
+	}
+	return emit(tx)
+}
+
+func getBlock(ctx context.Context, in blockInput, emit func(*Block) error) error {
+	b, err := in.Client.GetBlock(ctx, in.Hash)
+	if err != nil {
+		return mapErr(err)
+	}
+	return emit(b)
+}
+
+// --- Resolver: URI string functions, pure and network-free ---
+
+// Classify turns any accepted input into the canonical (type, id).
+// Bitcoin address (starts with 1, 3, bc1) -> "address"
+// 64-char hex -> "tx"
+// numeric -> "height" (not directly addressable, but classified)
+// otherwise -> "block"
+func (Domain) Classify(input string) (uriType, id string, err error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", errs.Usage("empty input")
+	}
+	// strip scheme if any
+	if after, ok := strings.CutPrefix(input, "https://"+Host); ok {
+		input = strings.Trim(after, "/")
+	}
+	if after, ok := strings.CutPrefix(input, "http://"+Host); ok {
+		input = strings.Trim(after, "/")
+	}
+
+	// URL paths like /address/1..., /tx/..., /block/...
+	if rest, ok := strings.CutPrefix(input, "address/"); ok {
+		return "address", rest, nil
+	}
+	if rest, ok := strings.CutPrefix(input, "tx/"); ok {
+		return "tx", rest, nil
+	}
+	if rest, ok := strings.CutPrefix(input, "block/"); ok {
+		return "block", rest, nil
+	}
+
+	// bare values
+	if isBitcoinAddress(input) {
+		return "address", input, nil
+	}
+	if is64Hex(input) {
+		return "tx", input, nil
+	}
+	if isNumeric(input) {
+		return "height", input, nil
+	}
+	// assume block hash
+	return "block", input, nil
 }
 
 // Locate is the inverse: the live https URL for a (type, id).
 func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
-		return "", errs.Usage("mempool has no resource type %q", uriType)
+	switch uriType {
+	case "address":
+		return BaseURL + "/address/" + id, nil
+	case "tx":
+		return BaseURL + "/tx/" + id, nil
+	case "block", "height":
+		return BaseURL + "/block/" + id, nil
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
+	return "", errs.Usage("mempool has no resource type %q", uriType)
 }
 
 // --- helpers ---
 
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
+func isBitcoinAddress(s string) bool {
+	if strings.HasPrefix(s, "bc1") || strings.HasPrefix(s, "1") || strings.HasPrefix(s, "3") {
+		return len(s) >= 26 && len(s) <= 62
 	}
-	return strings.Trim(input, "/")
+	return false
+}
+
+func is64Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func isNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if !unicode.IsDigit(c) {
+			return false
+		}
+	}
+	return true
 }
 
 // mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
+// exit code.
 func mapErr(err error) error {
 	return err
 }
