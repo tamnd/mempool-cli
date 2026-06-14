@@ -32,16 +32,14 @@ func TestClassify(t *testing.T) {
 		{"3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy", "address", "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"},
 		// SegWit bech32 address
 		{"bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", "address", "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"},
-		// 64-char hex TXID
-		{"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", "tx", "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"},
-		// block hash (64-char hex but not a txid; classify treats both same way)
-		{"000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "tx", "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"},
-		// numeric height
-		{"953651", "height", "953651"},
+		// 64-char hex block hash
+		{"000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "block", "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"},
+		// 64-char hex TXID also classified as block (by hex rule)
+		{"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", "block", "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"},
+		// query fallback
+		{"bitcoin", "query", "bitcoin"},
 		// URL with address path
 		{"https://mempool.space/address/1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf", "address", "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"},
-		// URL with tx path
-		{"https://mempool.space/tx/4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", "tx", "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"},
 		// URL with block path
 		{"https://mempool.space/block/000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "block", "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"},
 	}
@@ -57,6 +55,13 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestClassifyEmpty(t *testing.T) {
+	_, _, err := Domain{}.Classify("")
+	if err == nil {
+		t.Error("expected error for empty input, got nil")
+	}
+}
+
 func TestLocate(t *testing.T) {
 	cases := []struct {
 		uriType string
@@ -64,7 +69,6 @@ func TestLocate(t *testing.T) {
 		want    string
 	}{
 		{"address", "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf", "https://mempool.space/address/1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"},
-		{"tx", "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b", "https://mempool.space/tx/4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"},
 		{"block", "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "https://mempool.space/block/000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"},
 	}
 	for _, tc := range cases {

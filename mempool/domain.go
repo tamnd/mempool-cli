@@ -14,11 +14,8 @@ import (
 //
 //	import _ "github.com/tamnd/mempool-cli/mempool"
 //
-// exactly as a database/sql program enables a driver with `import _
-// "github.com/lib/pq"`. The init below registers it; the host then dereferences
-// mempool:// URIs by routing to the operations Register installs. The same
-// Domain also builds the standalone mempool binary (see cli.NewApp), so the
-// binary and a host share one source of truth.
+// The same Domain also builds the standalone mempool binary (see cli.NewApp),
+// so the binary and a host share one source of truth.
 func init() { kit.Register(Domain{}) }
 
 // Domain is the mempool driver. It carries no state; the per-run client is
@@ -49,26 +46,18 @@ of your tools. No API key, nothing to run alongside it.`,
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	kit.Handle(app, kit.OpMeta{Name: "price", Group: "read", Single: true,
-		Summary: "Fetch the current BTC price in multiple currencies"}, getPrice)
-
 	kit.Handle(app, kit.OpMeta{Name: "fees", Group: "read", Single: true,
 		Summary: "Fetch recommended transaction fee rates (sat/vByte)"}, getFees)
 
 	kit.Handle(app, kit.OpMeta{Name: "blocks", Group: "read", List: true,
 		Summary: "List the most recent blocks"}, getBlocks)
 
+	kit.Handle(app, kit.OpMeta{Name: "lightning", Group: "read", Single: true,
+		Summary: "Fetch the latest Lightning Network statistics"}, getLightning)
+
 	kit.Handle(app, kit.OpMeta{Name: "address", Group: "read", Single: true,
 		Summary: "Fetch chain stats for a Bitcoin address", URIType: "address", Resolver: true,
 		Args: []kit.Arg{{Name: "address", Help: "Bitcoin address"}}}, getAddress)
-
-	kit.Handle(app, kit.OpMeta{Name: "tx", Group: "read", Single: true,
-		Summary: "Fetch a transaction by TXID", URIType: "tx", Resolver: true,
-		Args: []kit.Arg{{Name: "txid", Help: "transaction ID"}}}, getTx)
-
-	kit.Handle(app, kit.OpMeta{Name: "block", Group: "read", Single: true,
-		Summary: "Fetch a block by hash", URIType: "block", Resolver: true,
-		Args: []kit.Arg{{Name: "hash", Help: "block hash"}}}, getBlock)
 }
 
 // newClient builds the client from the host-resolved config.
@@ -91,16 +80,16 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 
 // --- inputs ---
 
-type priceInput struct {
-	Client *Client `kit:"inject"`
-}
-
 type feesInput struct {
 	Client *Client `kit:"inject"`
 }
 
 type blocksInput struct {
-	Limit  int     `kit:"flag,inherit" help:"number of recent blocks" default:"10"`
+	Limit  int     `kit:"flag,inherit" help:"max blocks" default:"10"`
+	Client *Client `kit:"inject"`
+}
+
+type lightningInput struct {
 	Client *Client `kit:"inject"`
 }
 
@@ -109,28 +98,10 @@ type addressInput struct {
 	Client  *Client `kit:"inject"`
 }
 
-type txInput struct {
-	TXID   string  `kit:"arg" help:"transaction ID"`
-	Client *Client `kit:"inject"`
-}
-
-type blockInput struct {
-	Hash   string  `kit:"arg" help:"block hash"`
-	Client *Client `kit:"inject"`
-}
-
 // --- handlers ---
 
-func getPrice(ctx context.Context, in priceInput, emit func(*Price) error) error {
-	p, err := in.Client.GetPrice(ctx)
-	if err != nil {
-		return mapErr(err)
-	}
-	return emit(p)
-}
-
 func getFees(ctx context.Context, in feesInput, emit func(*Fees) error) error {
-	f, err := in.Client.GetFees(ctx)
+	f, err := in.Client.Fees(ctx)
 	if err != nil {
 		return mapErr(err)
 	}
@@ -138,49 +109,40 @@ func getFees(ctx context.Context, in feesInput, emit func(*Fees) error) error {
 }
 
 func getBlocks(ctx context.Context, in blocksInput, emit func(*Block) error) error {
-	blocks, err := in.Client.GetBlocks(ctx, in.Limit)
+	blocks, err := in.Client.Blocks(ctx, in.Limit)
 	if err != nil {
 		return mapErr(err)
 	}
-	for _, b := range blocks {
-		if err := emit(b); err != nil {
+	for i := range blocks {
+		if err := emit(&blocks[i]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func getLightning(ctx context.Context, in lightningInput, emit func(*LightningStats) error) error {
+	s, err := in.Client.Lightning(ctx)
+	if err != nil {
+		return mapErr(err)
+	}
+	return emit(s)
+}
+
 func getAddress(ctx context.Context, in addressInput, emit func(*Address) error) error {
-	a, err := in.Client.GetAddress(ctx, in.Address)
+	a, err := in.Client.Address(ctx, in.Address)
 	if err != nil {
 		return mapErr(err)
 	}
 	return emit(a)
 }
 
-func getTx(ctx context.Context, in txInput, emit func(*Transaction) error) error {
-	tx, err := in.Client.GetTransaction(ctx, in.TXID)
-	if err != nil {
-		return mapErr(err)
-	}
-	return emit(tx)
-}
-
-func getBlock(ctx context.Context, in blockInput, emit func(*Block) error) error {
-	b, err := in.Client.GetBlock(ctx, in.Hash)
-	if err != nil {
-		return mapErr(err)
-	}
-	return emit(b)
-}
-
 // --- Resolver: URI string functions, pure and network-free ---
 
 // Classify turns any accepted input into the canonical (type, id).
 // Bitcoin address (starts with 1, 3, bc1) -> "address"
-// 64-char hex -> "tx"
-// numeric -> "height" (not directly addressable, but classified)
-// otherwise -> "block"
+// 64-char hex -> "block"
+// otherwise -> "query"
 func (Domain) Classify(input string) (uriType, id string, err error) {
 	input = strings.TrimSpace(input)
 	if input == "" {
@@ -194,12 +156,9 @@ func (Domain) Classify(input string) (uriType, id string, err error) {
 		input = strings.Trim(after, "/")
 	}
 
-	// URL paths like /address/1..., /tx/..., /block/...
+	// URL paths like /address/1..., /block/...
 	if rest, ok := strings.CutPrefix(input, "address/"); ok {
 		return "address", rest, nil
-	}
-	if rest, ok := strings.CutPrefix(input, "tx/"); ok {
-		return "tx", rest, nil
 	}
 	if rest, ok := strings.CutPrefix(input, "block/"); ok {
 		return "block", rest, nil
@@ -210,13 +169,9 @@ func (Domain) Classify(input string) (uriType, id string, err error) {
 		return "address", input, nil
 	}
 	if is64Hex(input) {
-		return "tx", input, nil
+		return "block", input, nil
 	}
-	if isNumeric(input) {
-		return "height", input, nil
-	}
-	// assume block hash
-	return "block", input, nil
+	return "query", input, nil
 }
 
 // Locate is the inverse: the live https URL for a (type, id).
@@ -224,9 +179,7 @@ func (Domain) Locate(uriType, id string) (string, error) {
 	switch uriType {
 	case "address":
 		return BaseURL + "/address/" + id, nil
-	case "tx":
-		return BaseURL + "/tx/" + id, nil
-	case "block", "height":
+	case "block":
 		return BaseURL + "/block/" + id, nil
 	}
 	return "", errs.Usage("mempool has no resource type %q", uriType)

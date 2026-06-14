@@ -75,8 +75,7 @@ func NewClient(cfg Config) *Client {
 }
 
 // get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
+// to the client's settings.
 func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.Retries; attempt++ {
@@ -146,243 +145,137 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Price holds the current BTC exchange rates.
-type Price struct {
-	Time  int64            `json:"time"`
-	Rates map[string]int64 `json:"rates"`
-}
+// --- output types ---
 
 // Fees holds the current recommended fee rates in sat/vByte.
 type Fees struct {
-	FastestFee  int `kit:"id" json:"fastest_fee"`
-	HalfHourFee int `json:"half_hour_fee"`
-	HourFee     int `json:"hour_fee"`
-	EconomyFee  int `json:"economy_fee"`
-	MinimumFee  int `json:"minimum_fee"`
+	Fastest  int `kit:"id" json:"fastestFee"`
+	HalfHour int `json:"halfHourFee"`
+	Hour     int `json:"hourFee"`
+	Economy  int `json:"economyFee"`
+	Minimum  int `json:"minimumFee"`
+}
+
+// Pool describes the mining pool that found a block.
+type Pool struct {
+	Name string `json:"name"`
+	Link string `json:"link"`
+	Slug string `json:"slug"`
 }
 
 // Block holds summary data for a single Bitcoin block.
 type Block struct {
-	ID        string  `kit:"id" json:"id"`
-	Height    int     `json:"height"`
-	Timestamp int64   `json:"timestamp"`
-	Size      int     `json:"size"`
-	Weight    int     `json:"weight"`
-	TxCount   int     `json:"tx_count"`
-	TotalFees int64   `json:"total_fees"`
-	MedianFee float64 `json:"median_fee"`
-	AvgFee    float64 `json:"avg_fee"`
+	ID        string `kit:"id" json:"id"`
+	Height    int    `json:"height"`
+	Timestamp int64  `json:"timestamp"`
+	TxCount   int    `json:"tx_count"`
+	Size      int    `json:"size"`
+	Weight    int    `json:"weight"`
 }
 
-// Address holds the chain stats for a Bitcoin address.
+// LightningStats holds the latest Lightning Network statistics.
+type LightningStats struct {
+	Added         string `kit:"id" json:"added"`
+	ChannelCount  int    `json:"channel_count"`
+	NodeCount     int    `json:"node_count"`
+	TotalCapacity int64  `json:"total_capacity"`
+	TorNodes      int    `json:"tor_nodes"`
+	ClearnetNodes int    `json:"clearnet_nodes"`
+}
+
+// Address holds the chain and mempool stats for a Bitcoin address.
 type Address struct {
-	Address     string `kit:"id" json:"address"`
-	TxCount     int    `json:"tx_count"`
-	FundedSum   int64  `json:"funded_sum"`
-	FundedCount int    `json:"funded_count"`
-	SpentSum    int64  `json:"spent_sum"`
-	Balance     int64  `json:"balance"`
+	Address              string `kit:"id" json:"address"`
+	ChainFundedTxoCount  int    `json:"chain_funded_txo_count"`
+	ChainFundedTxoSum    int64  `json:"chain_funded_txo_sum"`
+	ChainSpentTxoCount   int    `json:"chain_spent_txo_count"`
+	ChainSpentTxoSum     int64  `json:"chain_spent_txo_sum"`
+	ChainTxCount         int    `json:"chain_tx_count"`
+	MempoolFundedTxoCount int   `json:"mempool_funded_txo_count"`
+	MempoolTxCount       int    `json:"mempool_tx_count"`
 }
 
-// Transaction holds the data for a single Bitcoin transaction.
-type Transaction struct {
-	TXID        string `kit:"id" json:"txid"`
-	Size        int    `json:"size"`
-	Weight      int    `json:"weight"`
-	Fee         int64  `json:"fee"`
-	VinCount    int    `json:"vin_count"`
-	VoutCount   int    `json:"vout_count"`
-	Confirmed   bool   `json:"confirmed"`
-	BlockHeight int    `json:"block_height"`
+// wireAddress is the raw JSON shape from the mempool.space API.
+type wireAddress struct {
+	Address    string `json:"address"`
+	ChainStats struct {
+		FundedTxoCount int   `json:"funded_txo_count"`
+		FundedTxoSum   int64 `json:"funded_txo_sum"`
+		SpentTxoCount  int   `json:"spent_txo_count"`
+		SpentTxoSum    int64 `json:"spent_txo_sum"`
+		TxCount        int   `json:"tx_count"`
+	} `json:"chain_stats"`
+	MempoolStats struct {
+		FundedTxoCount int `json:"funded_txo_count"`
+		TxCount        int `json:"tx_count"`
+	} `json:"mempool_stats"`
 }
 
-// GetPrice fetches the current BTC price in multiple currencies.
-func (c *Client) GetPrice(ctx context.Context) (*Price, error) {
-	body, err := c.get(ctx, BaseURL+"/api/v1/prices")
-	if err != nil {
-		return nil, err
-	}
-	var raw map[string]json.Number
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("parse price: %w", err)
-	}
-	p := &Price{Rates: make(map[string]int64)}
-	for k, v := range raw {
-		n, err := v.Int64()
-		if err != nil {
-			continue
-		}
-		if k == "time" {
-			p.Time = n
-		} else {
-			p.Rates[k] = n
-		}
-	}
-	return p, nil
-}
+// --- client methods ---
 
-// GetFees fetches the current recommended fee rates.
-func (c *Client) GetFees(ctx context.Context) (*Fees, error) {
+// Fees fetches the current recommended fee rates in sat/vByte.
+func (c *Client) Fees(ctx context.Context) (*Fees, error) {
 	body, err := c.get(ctx, BaseURL+"/api/v1/fees/recommended")
 	if err != nil {
 		return nil, err
 	}
-	var raw struct {
-		FastestFee  int `json:"fastestFee"`
-		HalfHourFee int `json:"halfHourFee"`
-		HourFee     int `json:"hourFee"`
-		EconomyFee  int `json:"economyFee"`
-		MinimumFee  int `json:"minimumFee"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
+	var f Fees
+	if err := json.Unmarshal(body, &f); err != nil {
 		return nil, fmt.Errorf("parse fees: %w", err)
 	}
-	return &Fees{
-		FastestFee:  raw.FastestFee,
-		HalfHourFee: raw.HalfHourFee,
-		HourFee:     raw.HourFee,
-		EconomyFee:  raw.EconomyFee,
-		MinimumFee:  raw.MinimumFee,
-	}, nil
+	return &f, nil
 }
 
-// GetBlocks fetches the most recent blocks. The API returns the last 10 blocks;
-// limit <= 10 slices the result; limit 0 or > 10 returns all 10.
-func (c *Client) GetBlocks(ctx context.Context, limit int) ([]*Block, error) {
+// Blocks fetches the most recent blocks, truncated to limit entries.
+// A limit of 0 returns all blocks the API sends (usually 10).
+func (c *Client) Blocks(ctx context.Context, limit int) ([]Block, error) {
 	body, err := c.get(ctx, BaseURL+"/api/blocks")
 	if err != nil {
 		return nil, err
 	}
-
-	var raw []struct {
-		ID        string `json:"id"`
-		Height    int    `json:"height"`
-		Timestamp int64  `json:"timestamp"`
-		Size      int    `json:"size"`
-		Weight    int    `json:"weight"`
-		TxCount   int    `json:"tx_count"`
-		Extras    struct {
-			TotalFees int64   `json:"totalFees"`
-			MedianFee float64 `json:"medianFee"`
-			AvgFee    float64 `json:"avgFee"`
-		} `json:"extras"`
-	}
+	var raw []Block
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("parse blocks: %w", err)
 	}
-
-	var out []*Block
-	for i, r := range raw {
-		if limit > 0 && i >= limit {
-			break
-		}
-		out = append(out, &Block{
-			ID:        r.ID,
-			Height:    r.Height,
-			Timestamp: r.Timestamp,
-			Size:      r.Size,
-			Weight:    r.Weight,
-			TxCount:   r.TxCount,
-			TotalFees: r.Extras.TotalFees,
-			MedianFee: r.Extras.MedianFee,
-			AvgFee:    r.Extras.AvgFee,
-		})
+	if limit > 0 && limit < len(raw) {
+		raw = raw[:limit]
 	}
-	return out, nil
+	return raw, nil
 }
 
-// GetBlock fetches a single block by its hash.
-func (c *Client) GetBlock(ctx context.Context, hash string) (*Block, error) {
-	body, err := c.get(ctx, BaseURL+"/api/block/"+hash)
+// Lightning fetches the latest Lightning Network statistics.
+func (c *Client) Lightning(ctx context.Context) (*LightningStats, error) {
+	body, err := c.get(ctx, BaseURL+"/api/v1/lightning/statistics/latest")
 	if err != nil {
 		return nil, err
 	}
-	var raw struct {
-		ID        string `json:"id"`
-		Height    int    `json:"height"`
-		Timestamp int64  `json:"timestamp"`
-		Size      int    `json:"size"`
-		Weight    int    `json:"weight"`
-		TxCount   int    `json:"tx_count"`
-		Extras    struct {
-			TotalFees int64   `json:"totalFees"`
-			MedianFee float64 `json:"medianFee"`
-			AvgFee    float64 `json:"avgFee"`
-		} `json:"extras"`
+	var wrapper struct {
+		Latest LightningStats `json:"latest"`
 	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("parse block: %w", err)
+	if err := json.Unmarshal(body, &wrapper); err != nil {
+		return nil, fmt.Errorf("parse lightning: %w", err)
 	}
-	return &Block{
-		ID:        raw.ID,
-		Height:    raw.Height,
-		Timestamp: raw.Timestamp,
-		Size:      raw.Size,
-		Weight:    raw.Weight,
-		TxCount:   raw.TxCount,
-		TotalFees: raw.Extras.TotalFees,
-		MedianFee: raw.Extras.MedianFee,
-		AvgFee:    raw.Extras.AvgFee,
-	}, nil
+	return &wrapper.Latest, nil
 }
 
-// GetAddress fetches the chain stats for a Bitcoin address.
-func (c *Client) GetAddress(ctx context.Context, address string) (*Address, error) {
-	body, err := c.get(ctx, BaseURL+"/api/address/"+address)
+// Address fetches chain and mempool stats for a Bitcoin address.
+func (c *Client) Address(ctx context.Context, addr string) (*Address, error) {
+	body, err := c.get(ctx, BaseURL+"/api/address/"+addr)
 	if err != nil {
 		return nil, err
 	}
-	var raw struct {
-		Address    string `json:"address"`
-		ChainStats struct {
-			FundedTxoCount int   `json:"funded_txo_count"`
-			FundedTxoSum   int64 `json:"funded_txo_sum"`
-			SpentTxoSum    int64 `json:"spent_txo_sum"`
-			TxCount        int   `json:"tx_count"`
-		} `json:"chain_stats"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
+	var w wireAddress
+	if err := json.Unmarshal(body, &w); err != nil {
 		return nil, fmt.Errorf("parse address: %w", err)
 	}
 	return &Address{
-		Address:     raw.Address,
-		TxCount:     raw.ChainStats.TxCount,
-		FundedSum:   raw.ChainStats.FundedTxoSum,
-		FundedCount: raw.ChainStats.FundedTxoCount,
-		SpentSum:    raw.ChainStats.SpentTxoSum,
-		Balance:     raw.ChainStats.FundedTxoSum - raw.ChainStats.SpentTxoSum,
-	}, nil
-}
-
-// GetTransaction fetches a single transaction by its TXID.
-func (c *Client) GetTransaction(ctx context.Context, txid string) (*Transaction, error) {
-	body, err := c.get(ctx, BaseURL+"/api/tx/"+txid)
-	if err != nil {
-		return nil, err
-	}
-	var raw struct {
-		TXID   string            `json:"txid"`
-		Size   int               `json:"size"`
-		Weight int               `json:"weight"`
-		Fee    int64             `json:"fee"`
-		Vin    []json.RawMessage `json:"vin"`
-		Vout   []json.RawMessage `json:"vout"`
-		Status struct {
-			Confirmed   bool `json:"confirmed"`
-			BlockHeight int  `json:"block_height"`
-		} `json:"status"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("parse tx: %w", err)
-	}
-	return &Transaction{
-		TXID:        raw.TXID,
-		Size:        raw.Size,
-		Weight:      raw.Weight,
-		Fee:         raw.Fee,
-		VinCount:    len(raw.Vin),
-		VoutCount:   len(raw.Vout),
-		Confirmed:   raw.Status.Confirmed,
-		BlockHeight: raw.Status.BlockHeight,
+		Address:              w.Address,
+		ChainFundedTxoCount:  w.ChainStats.FundedTxoCount,
+		ChainFundedTxoSum:    w.ChainStats.FundedTxoSum,
+		ChainSpentTxoCount:   w.ChainStats.SpentTxoCount,
+		ChainSpentTxoSum:     w.ChainStats.SpentTxoSum,
+		ChainTxCount:         w.ChainStats.TxCount,
+		MempoolFundedTxoCount: w.MempoolStats.FundedTxoCount,
+		MempoolTxCount:       w.MempoolStats.TxCount,
 	}, nil
 }
